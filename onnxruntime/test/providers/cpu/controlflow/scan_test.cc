@@ -1272,6 +1272,7 @@ static void RunTest_VarLen(const std::string test_name, int64_t sequence_len, in
                            std::vector<float> output_2,
                            std::vector<float> output_3,
                            RunOptions options = {},
+                           std::vector<int64_t>* output_lengths = nullptr,
                            OpTester::ExpectResult expect_result = OpTester::ExpectResult::kExpectSuccess,
                            const std::string& failure_message = "") {
   // Use the same subgraph as standard Scan tests.
@@ -1308,6 +1309,14 @@ static void RunTest_VarLen(const std::string test_name, int64_t sequence_len, in
   }
 
   test.AddShapeToTensorData(options.include_dim_values_in_main_graph);
+
+  // Input 0: output_lengths (optional)
+  if (output_lengths != nullptr) {
+    std::vector<int64_t> lengths_shape{static_cast<int64_t>(output_lengths->size())};
+    test.AddInput<int64_t>("output_lengths", lengths_shape, *output_lengths);
+  } else {
+    test.AddOptionalInputEdge<int64_t>();
+  }
 
   std::vector<int64_t> loop_state_shape;
   if (!options.scalar_loop_state_value) {
@@ -1378,7 +1387,7 @@ static void VarLen_ShortSequenceOneInBatchOneLoopStateVar(const RunOptions& opti
                  nullptr, nullptr, nullptr, nullptr,
                  iteration_count_in, input_0, input_1,
                  iteration_count_out, output_0, output_1, output_2, output_3,
-                 options,
+                 options, nullptr,
                  expected_error.empty() ? OpTester::ExpectResult::kExpectSuccess : OpTester::ExpectResult::kExpectFailure,
                  expected_error);
 }
@@ -1502,6 +1511,114 @@ TEST(ScanVarLen, OutputReversal_NoShapeInMainGraph_TypeAndShapeInSubgraph) {
                  iteration_count_in, input_0, input_1,
                  iteration_count_out, output_0, output_1, output_2, output_3,
                  options);
+}
+
+// ---------------------------------------------------------------------------
+// Tests for the pre-allocation path (with output_lengths specified).
+// These tests provide output_lengths to enable the in-place construction optimization.
+// ---------------------------------------------------------------------------
+
+TEST(ScanVarLen, PreAlloc_Basic) {
+  RunOptions options{};
+  options.is_v8 = false;
+  options.include_dim_values_in_main_graph = false;
+  options.include_types_in_subgraph = true;
+  options.include_dim_values_in_subgraph = true;
+
+  constexpr int64_t sequence_len = 2;
+  constexpr int64_t input_size = 2;
+
+  std::vector<float> iteration_count_in{0.f};
+
+  std::vector<float> input_0{1.f, 2.f,
+                             4.f, 3.f};
+  std::vector<float> input_1{3.f, 4.f,
+                             2.f, 1.f};
+
+  std::vector<float> iteration_count_out{2.f};
+
+  std::vector<float> output_0{1.f, 4.f};
+  std::vector<float> output_1{2.f, 3.f};
+  std::vector<float> output_2{3.f, 2.f};
+  std::vector<float> output_3{4.f, 1.f};
+
+  // Each scan output has shape [1] per iteration, so total concat len = 2 for each
+  std::vector<int64_t> output_lengths{2, 2, 2, 2};
+
+  RunTest_VarLen("VarLen_PreAlloc_Basic", input_size, sequence_len,
+                 nullptr, nullptr, nullptr, nullptr,
+                 iteration_count_in, input_0, input_1,
+                 iteration_count_out, output_0, output_1, output_2, output_3,
+                 options, &output_lengths);
+}
+
+TEST(ScanVarLen, PreAlloc_WithOutputReversal) {
+  RunOptions options{};
+  options.is_v8 = false;
+  options.include_dim_values_in_main_graph = false;
+  options.include_types_in_subgraph = true;
+  options.include_dim_values_in_subgraph = true;
+
+  constexpr int64_t sequence_len = 2;
+  constexpr int64_t input_size = 2;
+
+  std::vector<float> iteration_count_in{0.f};
+
+  std::vector<float> input_0{1.f, 2.f,
+                             4.f, 3.f};
+  std::vector<float> input_1{3.f, 4.f,
+                             2.f, 1.f};
+
+  std::vector<float> iteration_count_out{2.f};
+
+  // outputs are reversed: iter 1 values come before iter 0 values
+  std::vector<float> output_0{4.f, 1.f};
+  std::vector<float> output_1{3.f, 2.f};
+  std::vector<float> output_2{2.f, 3.f};
+  std::vector<float> output_3{1.f, 4.f};
+
+  std::vector<int64_t> output_directions{1, 1, 1, 1};
+  std::vector<int64_t> output_lengths{2, 2, 2, 2};
+
+  RunTest_VarLen("VarLen_PreAlloc_WithOutputReversal", input_size, sequence_len,
+                 nullptr, &output_directions, nullptr, nullptr,
+                 iteration_count_in, input_0, input_1,
+                 iteration_count_out, output_0, output_1, output_2, output_3,
+                 options, &output_lengths);
+}
+
+TEST(ScanVarLen, PreAlloc_ScalarLoopState) {
+  RunOptions options{};
+  options.is_v8 = false;
+  options.include_dim_values_in_main_graph = true;
+  options.include_types_in_subgraph = false;
+  options.include_dim_values_in_subgraph = false;
+  options.scalar_loop_state_value = true;
+
+  constexpr int64_t sequence_len = 2;
+  constexpr int64_t input_size = 2;
+
+  std::vector<float> iteration_count_in{0.f};
+
+  std::vector<float> input_0{1.f, 2.f,
+                             4.f, 3.f};
+  std::vector<float> input_1{3.f, 4.f,
+                             2.f, 1.f};
+
+  std::vector<float> iteration_count_out{2.f};
+
+  std::vector<float> output_0{1.f, 4.f};
+  std::vector<float> output_1{2.f, 3.f};
+  std::vector<float> output_2{3.f, 2.f};
+  std::vector<float> output_3{4.f, 1.f};
+
+  std::vector<int64_t> output_lengths{2, 2, 2, 2};
+
+  RunTest_VarLen("VarLen_PreAlloc_ScalarLoopState", input_size, sequence_len,
+                 nullptr, nullptr, nullptr, nullptr,
+                 iteration_count_in, input_0, input_1,
+                 iteration_count_out, output_0, output_1, output_2, output_3,
+                 options, &output_lengths);
 }
 
 }  // namespace test

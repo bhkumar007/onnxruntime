@@ -13,6 +13,7 @@ ONNX_OPERATOR_KERNEL_EX(
     1,
     kCpuExecutionProvider,
     KernelDefBuilder()
+        .TypeConstraint("I", DataTypeImpl::GetTensorType<int64_t>())
         .TypeConstraint("V", DataTypeImpl::AllTensorTypes()),
     ScanVarLen);
 

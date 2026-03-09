@@ -2936,9 +2936,19 @@ void RegisterContribSchemas() {
           "Identical to ONNX Scan (opset 9), except that per-iteration scan outputs "
           "are concatenated along the scan output axis instead of being stacked with a "
           "new sequence dimension. This allows the concatenation-axis dimension to "
-          "differ across iterations.")
+          "differ across iterations. "
+          "An optional output_lengths input can be provided to pre-allocate the final "
+          "output tensors, enabling in-place construction of scan outputs.")
       .Input(
           0,
+          "output_lengths",
+          "Optional 1D int64 tensor where the i-th entry specifies the expected "
+          "total size of the i-th scan output along the concatenation axis. "
+          "When provided, output tensors are pre-allocated for efficiency.",
+          "I",
+          OpSchema::Optional)
+      .Input(
+          1,
           "initial_state_and_scan_inputs",
           "Initial values of the N loop state variables followed by M scan_inputs",
           "V",
@@ -2978,6 +2988,13 @@ void RegisterContribSchemas() {
             AttributeProto::INTS,
             OPTIONAL_VALUE)
       .TypeConstraint(
+<<<<<<< HEAD
+=======
+          "I",
+          {"tensor(int64)"},
+          "Int64 tensor for output_lengths")
+      .TypeConstraint(
+>>>>>>> e2cebc36d7 (Generalize Scan op for variable-length scan outputs)
           "V",
           OpSchema::all_tensor_types(),
           "All Tensor types");

@@ -1,0 +1,4 @@
+gtests:
+/home/grama/onnxruntime/build/Debug/Debug/onnxruntime_test_all
+.../onnxruntime_provider_test
+.../onnxruntime_mlas_test
