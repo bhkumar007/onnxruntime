@@ -2993,7 +2993,12 @@ static void VarLenScanInferenceFunction(ONNX_NAMESPACE::InferenceContext& ctx) {
         auto scan_input_index = i - num_loop_state_vars;
         int axis = static_cast<int>(axes[scan_input_index]);
         const auto& shape = input_type->tensor_type().shape();
-        if (axis < 0) axis += shape.dim_size();
+        int rank = shape.dim_size();
+        if (axis < 0) axis += rank;
+        if (axis < 0 || axis >= rank) {
+          fail_shape_inference("Invalid scan_input_axes value ", axes[scan_input_index],
+                               " for input rank ", rank);
+        }
 
         temporary_type_protos.emplace_back(RemoveIthDimensionFromShape(*input_type, axis));
         subgraph_input_types.push_back(&temporary_type_protos.back());
@@ -3038,11 +3043,13 @@ static void VarLenScanInferenceFunction(ONNX_NAMESPACE::InferenceContext& ctx) {
         scan_output_type->mutable_tensor_type()->set_elem_type(subgraph_output_tensor_type.elem_type());
 
         // Variable-length concatenation: output shape = subgraph output shape with
-        // the concat axis (dim 0 before transpose) left unknown.
+        // the concat axis dimension left unknown (since it varies across iterations).
         if (subgraph_output_tensor_type.has_shape()) {
           const auto& subgraph_shape = subgraph_output_tensor_type.shape();
           auto subgraph_rank = subgraph_shape.dim_size();
 
+          // No extra dimension is added (unlike standard Scan which stacks).
+          // Dim 0 (the concat axis) is set to unknown.
           TensorShapeProto inferred_shape;
           for (int d = 0; d < subgraph_rank; ++d) {
             if (d == 0) {
@@ -3057,8 +3064,10 @@ static void VarLenScanInferenceFunction(ONNX_NAMESPACE::InferenceContext& ctx) {
           int64_t output_axis = output_axes[scan_output_index];
           if (output_axis != 0 && subgraph_rank > 1) {
             if (output_axis < 0) output_axis += subgraph_rank;
+            if (output_axis < 0 || output_axis >= subgraph_rank) {
+              fail_shape_inference("Invalid scan_output_axes value for output ", i - num_loop_state_vars);
+            }
 
-            // Transpose: move the concat dim from position 0 to output_axis.
             TensorShapeProto transposed_shape;
             for (int d = 0; d < subgraph_rank; ++d) {
               if (d < output_axis) {
@@ -3108,7 +3117,7 @@ void RegisterContribSchemas() {
           "Initial values of the N loop state variables followed by M scan_inputs",
           "V",
           OpSchema::Variadic,
-          true,
+          false,
           1,
           OpSchema::NonDifferentiable)
       .Output(
@@ -3117,7 +3126,7 @@ void RegisterContribSchemas() {
           "Final values of the N loop state variables followed by K scan_outputs",
           "V",
           OpSchema::Variadic,
-          true,
+          false,
           1,
           OpSchema::NonDifferentiable)
       .Attr("body",
