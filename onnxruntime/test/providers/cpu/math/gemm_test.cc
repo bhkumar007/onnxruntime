@@ -2,6 +2,9 @@
 // Licensed under the MIT License.
 
 #include "gtest/gtest.h"
+#include <limits>
+#include "core/framework/allocator.h"
+#include "core/framework/tensor.h"
 #include "core/mlas/inc/mlas.h"
 #include "core/framework/run_options.h"
 #include "test/common/cuda_op_test_utils.h"
@@ -1510,6 +1513,20 @@ std::vector<GemmOptimizePackedParams> GenerateGemmParams() {
 
   std::vector<std::tuple<int64_t, int64_t, int64_t>> test_sizes = {{1, 1, 1}, {1, 64, 448}, {2, 3, 4}, {8, 8, 8}, {31, 31, 31}, {32, 32, 32}, {33, 67, 99}, {37, 64, 256}, {48, 48, 120}, {60, 16, 92}, {63, 64, 65}, {64, 64, 64}, {64, 64, 65}, {72, 80, 84}, {96, 24, 48}, {128, 32, 64}, {128, 128, 128}, {129, 129, 129}, {256, 64, 1024}, {16, 768, 192}, {15, 768, 192}, {16, 768, 191}};
 
+  // Invalid/edge-case B matrix dimensions: regression test for out-of-bounds
+  // read in MlasSgemmTransposePackB when GemmPackBFp32 received invalid
+  // dimensions. B is always 2D with shape {K,N} or {N,K} (transposed).
+  //
+  // Note: Only zero-dimension cases can be tested via OpTester. Negative and
+  // overflow dimensions are rejected by OpTester::AddInput before the model
+  // runs, so those are covered by the fuzzer (edge_ort_format_fuzzer) which
+  // feeds raw malformed protobuf bytes directly to ORT.
+  std::vector<std::tuple<int64_t, int64_t, int64_t>> invalid_dim_sizes = {
+      {2, 0, 4},  // K=0
+      {2, 4, 0},  // N=0
+      {0, 4, 4},  // M=0 (A is empty)
+  };
+
   std::vector<BiasType>
       bias_types = {BiasType::noBias, BiasType::MBias, BiasType::ScalarBias, BiasType::MNBias, BiasType::NBias};
 
@@ -1528,6 +1545,12 @@ std::vector<GemmOptimizePackedParams> GenerateGemmParams() {
         params.push_back({std::get<0>(size), std::get<1>(size), std::get<2>(size),
                           bias_type, transA, transB});
       }
+    }
+    // Invalid dimension tests only with noBias to avoid initialize_bias
+    // trying to allocate based on negative/huge dimension values.
+    for (const auto& size : invalid_dim_sizes) {
+      params.push_back({std::get<0>(size), std::get<1>(size), std::get<2>(size),
+                        BiasType::noBias, transA, transB});
     }
   }
   return params;
@@ -1670,6 +1693,67 @@ TEST(GemmOpTest, GemmTransB_f16_32x32x128) {
       .Config(run_with_tunable_op)
       .RunWithConfig();
 }
+
+// Declared in gemm.cc — not in a public header, so forward-declare here.
+bool GemmPackBFp32(AllocatorPtr& alloc,
+                   const Tensor& tensor_b,
+                   bool trans_a,
+                   bool trans_b,
+                   IAllocatorUniquePtr<void>& packed_b,
+                   size_t& packed_b_size,
+                   TensorShape& b_shape,
+                   const MLAS_BACKEND_KERNEL_SELECTOR_CONFIG* mlas_backend_kernel_selector_config);
+
+// Direct tests for GemmPackBFp32 with invalid dimensions that can't go through
+// OpTester (which validates shapes before the model runs). These test the
+// dimension validation added to prevent the MlasSgemmTransposePackB OOB crash.
+class GemmPackBValidationTest : public ::testing::TestWithParam<std::pair<int64_t, int64_t>> {};
+
+TEST_P(GemmPackBValidationTest, InvalidDimensionsReturnFalse) {
+  auto [dim0, dim1] = GetParam();
+
+  // Create a minimal tensor with the given shape. We use a small backing
+  // buffer — the point is that GemmPackBFp32 should reject the shape before
+  // ever reading from the buffer.
+  float dummy_data[1] = {0.0f};
+  TensorShape shape({dim0, dim1});
+  OrtMemoryInfo cpu_info("Cpu", OrtAllocatorType::OrtDeviceAllocator);
+  Tensor tensor_b(DataTypeImpl::GetType<float>(), shape, dummy_data, cpu_info);
+
+  auto alloc = std::make_shared<CPUAllocator>();
+  IAllocatorUniquePtr<void> packed_b;
+  size_t packed_b_size = 0;
+  TensorShape b_shape;
+
+  bool result = GemmPackBFp32(alloc, tensor_b,
+                              /*trans_a=*/false, /*trans_b=*/false,
+                              packed_b, packed_b_size, b_shape, nullptr);
+
+  EXPECT_FALSE(result) << "GemmPackBFp32 should return false for shape {"
+                       << dim0 << ", " << dim1 << "}";
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    InvalidDimensions,
+    GemmPackBValidationTest,
+    ::testing::Values(
+        std::make_pair(int64_t{-1}, int64_t{4}),                                  // Negative dim0
+        std::make_pair(int64_t{4}, int64_t{-1}),                                  // Negative dim1
+        std::make_pair(int64_t{-1}, int64_t{-1}),                                 // Both negative
+        std::make_pair(std::numeric_limits<int64_t>::min(), int64_t{4}),           // INT64_MIN dim0
+        std::make_pair(int64_t{4}, std::numeric_limits<int64_t>::min()),           // INT64_MIN dim1
+        std::make_pair(std::numeric_limits<int64_t>::max(), int64_t{4}),           // Huge dim0
+        std::make_pair(int64_t{4}, std::numeric_limits<int64_t>::max())            // Huge dim1
+    ),
+    [](const ::testing::TestParamInfo<std::pair<int64_t, int64_t>>& info) {
+      auto [d0, d1] = info.param;
+      auto dim_str = [](int64_t v) -> std::string {
+        if (v >= 0) return std::to_string(v);
+        if (v == std::numeric_limits<int64_t>::min()) return "INT64_MIN";
+        return "neg" + std::to_string(-v);
+      };
+      return dim_str(d0) + "x" + dim_str(d1);
+    });
 
 }  // namespace test
 }  // namespace onnxruntime
